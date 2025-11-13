@@ -101,6 +101,19 @@ function toParagraphs(text: string): string {
   return paras.join("\n\n")
 }
 
+function formatContentForReadability(text: string): string {
+  const normalized = (text || "").replace(/\r\n?/g, "\n").trim()
+  if (!normalized) return ""
+  // If content already has paragraph breaks, respect them; otherwise, create paragraphs
+  const hasBlankLines = /\n\s*\n/.test(normalized)
+  const base = hasBlankLines ? normalized : toParagraphs(normalized)
+  // Normalize paragraphs to be separated by two blank lines for extra spacing
+  const parts = base.split(/\n\s*\n+/).map((p) => p.trim()).filter(Boolean)
+  const doubled = parts.join("\n\n\n")
+  // Add leading space before first paragraph
+  return "\n\n" + doubled
+}
+
 async function fetchArticleText(url: string): Promise<string> {
   try {
     const res = await fetch(url, {
@@ -400,7 +413,7 @@ export async function GET(request: NextRequest) {
             const result = JSON.parse(completion.choices[0].message.content || "{}")
             finalTitle = result.title || item.title
             finalExcerpt = result.excerpt || item.description.slice(0, 220)
-            finalContent = result.content || toParagraphs(baseText)
+            finalContent = formatContentForReadability(result.content || toParagraphs(baseText))
             isTranslated = true
             console.log("[v0] Translation complete")
           } catch (aiError) {
@@ -418,14 +431,14 @@ export async function GET(request: NextRequest) {
               finalTitle = tTitle || item.title
               const rawContent = tContent || baseText
               // Space content into short paragraphs
-              finalContent = toParagraphs(rawContent)
-              finalExcerpt = tExcerpt || (finalContent || "").slice(0, 220)
+              finalContent = formatContentForReadability(rawContent)
+              finalExcerpt = tExcerpt || (rawContent || "").slice(0, 220)
               isTranslated = true
             } else {
               // Last resort: keep original English but spaced
               finalTitle = item.title
               finalExcerpt = item.description.slice(0, 220)
-              finalContent = toParagraphs(baseText)
+              finalContent = formatContentForReadability(baseText)
               isTranslated = false
             }
           }
@@ -439,13 +452,13 @@ export async function GET(request: NextRequest) {
           if (tTitle || tExcerpt || tContent) {
             finalTitle = tTitle || item.title
             const rawContent = tContent || baseText
-            finalContent = toParagraphs(rawContent)
+            finalContent = formatContentForReadability(rawContent)
             finalExcerpt = tExcerpt || finalContent.slice(0, 220)
             isTranslated = true
           } else {
             const raw = baseText || ""
             finalExcerpt = raw.slice(0, 220)
-            finalContent = toParagraphs(raw)
+            finalContent = formatContentForReadability(raw)
           }
         }
 
