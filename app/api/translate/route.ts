@@ -100,8 +100,55 @@ export async function POST(request: NextRequest) {
         resultContent = data.content || resultContent
         usedAI = true
       } catch (e) {
-        // Fallback below
+        // Fallback to other providers below
       }
+    }
+    // If still not translated, try LibreTranslate if configured or default public instance
+    if (!usedAI) {
+      try {
+        const libreUrl = process.env.LIBRE_TRANSLATE_URL || "https://libretranslate.com"
+        const res = await fetch(`${libreUrl.replace(/\/$/, '')}/translate`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({ q: sourceText, source: "auto", target: "th", format: "text" }),
+          signal: AbortSignal.timeout(12000),
+        })
+        if (res.ok) {
+          const data = (await res.json()) as { translatedText?: string }
+          if (data?.translatedText) {
+            resultContent = data.translatedText
+            // Simple split for title/excerpt if missing
+            if (!resultTitle) resultTitle = resultContent.split(/\n|[。.!?]\s/)[0]?.slice(0, 120) || ""
+            if (!resultExcerpt) resultExcerpt = resultContent.slice(0, 200)
+            usedAI = true
+          }
+        }
+      } catch {}
+    }
+
+    // Last resort: Google translate (unofficial)
+    if (!usedAI) {
+      try {
+        const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: "th", dt: "t", q: sourceText })
+        const res = await fetch(`https://translate.googleapis.com/translate_a/single?${params.toString()}`, {
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(12000),
+        })
+        if (res.ok) {
+          const json = (await res.json()) as any
+          const chunks: string[] = (json?.[0] || []).map((c: any) => (c?.[0] || ""))
+          const translated = chunks.join("")
+          if (translated) {
+            resultContent = translated
+            if (!resultTitle) resultTitle = translated.split(/\n|[。.!?]\s/)[0]?.slice(0, 120) || ""
+            if (!resultExcerpt) resultExcerpt = translated.slice(0, 200)
+            usedAI = true
+          }
+        }
+      } catch {}
     }
 
     return Response.json({
@@ -116,4 +163,3 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: message }, { status: 500 })
   }
 }
-
