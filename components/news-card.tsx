@@ -1,6 +1,6 @@
 "use client"
 
-import { Copy, Check } from "lucide-react"
+import { Copy, Check, Loader2, Languages } from "lucide-react"
 import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -16,6 +16,8 @@ type NewsCardProps = {
 export function NewsCard({ news, index }: NewsCardProps) {
   const { toast } = useToast()
   const [copiedField, setCopiedField] = useState<string | null>(null)
+  const [data, setData] = useState<NormalizedNews>(news)
+  const [translating, setTranslating] = useState(false)
 
   const copyToClipboard = async (text: string, fieldName: string) => {
     try {
@@ -35,7 +37,7 @@ export function NewsCard({ news, index }: NewsCardProps) {
 
   const copyAllAsJSON = async () => {
     try {
-      const json = JSON.stringify(news, null, 2)
+      const json = JSON.stringify(data, null, 2)
       await navigator.clipboard.writeText(json)
       toast({
         description: "Copied entire news as JSON!",
@@ -48,17 +50,63 @@ export function NewsCard({ news, index }: NewsCardProps) {
     }
   }
 
+  const handleTranslate = async () => {
+    if (translating) return
+    setTranslating(true)
+    try {
+      const body = data.Sources?.[0]
+        ? { url: data.Sources[0] }
+        : { title: data.Title, description: data.Excerpt, content: data.Content }
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+      const json = await res.json()
+      if (!res.ok) {
+        throw new Error(json?.error || `Translate failed (${res.status})`)
+      }
+
+      const updated: NormalizedNews = {
+        ...data,
+        Title: json.title || data.Title,
+        Excerpt: json.excerpt || data.Excerpt,
+        Content: json.content || data.Content,
+        isTranslated: !!json.isTranslated,
+      }
+      setData(updated)
+      toast({ description: "Translated to Thai" })
+    } catch (e) {
+      toast({ variant: "destructive", description: e instanceof Error ? e.message : "Translate failed" })
+    } finally {
+      setTranslating(false)
+    }
+  }
+
   return (
     <Card className="relative">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-2">
           <CardTitle className="text-lg leading-tight">News #{index + 1}</CardTitle>
-          <Button variant="outline" size="sm" onClick={copyAllAsJSON} className="shrink-0 bg-transparent">
-            <Copy className="size-3.5 mr-1.5" />
-            Copy all as JSON
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleTranslate}
+              disabled={translating}
+              className="shrink-0 bg-transparent"
+              title="Translate this article to Thai"
+            >
+              {translating ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Languages className="size-3.5 mr-1.5" />}
+              Translate to Thai
+            </Button>
+            <Button variant="outline" size="sm" onClick={copyAllAsJSON} className="shrink-0 bg-transparent">
+              <Copy className="size-3.5 mr-1.5" />
+              Copy all as JSON
+            </Button>
+          </div>
         </div>
-        {news.isTranslated && (
+        {data.isTranslated && (
           <Badge
             variant="secondary"
             className="w-fit bg-amber-100 text-amber-900 dark:bg-amber-900/30 dark:text-amber-200"
@@ -74,14 +122,14 @@ export function NewsCard({ news, index }: NewsCardProps) {
           <div className="flex gap-2">
             <input
               type="text"
-              value={news.Title}
+              value={data.Title}
               readOnly
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
             />
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => copyToClipboard(news.Title, "Title")}
+              onClick={() => copyToClipboard(data.Title, "Title")}
               className="shrink-0"
             >
               {copiedField === "Title" ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
@@ -95,11 +143,11 @@ export function NewsCard({ news, index }: NewsCardProps) {
           <div className="flex gap-2">
             <input
               type="text"
-              value={news.Slug}
+              value={data.Slug}
               readOnly
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
             />
-            <Button variant="ghost" size="icon" onClick={() => copyToClipboard(news.Slug, "Slug")} className="shrink-0">
+            <Button variant="ghost" size="icon" onClick={() => copyToClipboard(data.Slug, "Slug")} className="shrink-0">
               {copiedField === "Slug" ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
             </Button>
           </div>
@@ -110,7 +158,7 @@ export function NewsCard({ news, index }: NewsCardProps) {
           <label className="text-xs font-medium text-muted-foreground">Excerpt</label>
           <div className="flex gap-2">
             <textarea
-              value={news.Excerpt}
+              value={data.Excerpt}
               readOnly
               rows={3}
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-none"
@@ -118,7 +166,7 @@ export function NewsCard({ news, index }: NewsCardProps) {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => copyToClipboard(news.Excerpt, "Excerpt")}
+              onClick={() => copyToClipboard(data.Excerpt, "Excerpt")}
               className="shrink-0"
             >
               {copiedField === "Excerpt" ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
@@ -132,14 +180,14 @@ export function NewsCard({ news, index }: NewsCardProps) {
           <div className="flex gap-2">
             <input
               type="text"
-              value={news.Category}
+              value={data.Category}
               readOnly
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
             />
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => copyToClipboard(news.Category, "Category")}
+              onClick={() => copyToClipboard(data.Category, "Category")}
               className="shrink-0"
             >
               {copiedField === "Category" ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
@@ -153,20 +201,20 @@ export function NewsCard({ news, index }: NewsCardProps) {
           <div className="flex gap-2">
             <input
               type="text"
-              value={news.Cover}
+              value={data.Cover}
               readOnly
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
             />
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => copyToClipboard(news.Cover, "Cover")}
+              onClick={() => copyToClipboard(data.Cover, "Cover")}
               className="shrink-0"
             >
               {copiedField === "Cover" ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
             </Button>
           </div>
-          {news.coverNote && <p className="text-xs text-muted-foreground">{news.coverNote}</p>}
+          {data.coverNote && <p className="text-xs text-muted-foreground">{data.coverNote}</p>}
         </div>
 
         {/* Sources */}
@@ -174,15 +222,15 @@ export function NewsCard({ news, index }: NewsCardProps) {
           <label className="text-xs font-medium text-muted-foreground">Sources</label>
           <div className="flex gap-2">
             <textarea
-              value={news.Sources.join("\n")}
+              value={data.Sources.join("\n")}
               readOnly
-              rows={Math.min(news.Sources.length, 5)}
+              rows={Math.min(data.Sources.length, 5)}
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-none"
             />
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => copyToClipboard(news.Sources.join("\n"), "Sources")}
+              onClick={() => copyToClipboard(data.Sources.join("\n"), "Sources")}
               className="shrink-0"
             >
               {copiedField === "Sources" ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}
@@ -195,7 +243,7 @@ export function NewsCard({ news, index }: NewsCardProps) {
           <label className="text-xs font-medium text-muted-foreground">Content</label>
           <div className="flex gap-2">
             <textarea
-              value={news.Content}
+              value={data.Content}
               readOnly
               rows={8}
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-none"
@@ -203,7 +251,7 @@ export function NewsCard({ news, index }: NewsCardProps) {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => copyToClipboard(news.Content, "Content")}
+              onClick={() => copyToClipboard(data.Content, "Content")}
               className="shrink-0"
             >
               {copiedField === "Content" ? <Check className="size-4 text-green-600" /> : <Copy className="size-4" />}

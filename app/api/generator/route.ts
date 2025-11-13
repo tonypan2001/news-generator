@@ -6,6 +6,21 @@ import { isThai } from "@/lib/lang"
 import { buildUnsplashQuery, buildUnsplashUrl } from "@/lib/unsplash"
 import type { Category, Region, NormalizedNews } from "@/lib/types"
 
+// Simple in-memory backoff to avoid hammering the AI when quota is exhausted
+let LAST_AI_ERROR_AT = 0
+function aiAvailable() {
+  if (!process.env.OPENAI_API_KEY) return false
+  if (process.env.DISABLE_AI === "true") return false
+  const cooldownMs = Number(process.env.AI_COOLDOWN_MS || 5 * 60 * 1000)
+  return Date.now() - LAST_AI_ERROR_AT > cooldownMs
+}
+function flagAIError(e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e)
+  if (/429|insufficient_quota|rate limit/i.test(msg)) {
+    LAST_AI_ERROR_AT = Date.now()
+  }
+}
+
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
@@ -154,6 +169,7 @@ export async function GET(request: NextRequest) {
     const category = searchParams.get("category") as Category
     const region = searchParams.get("region") as Region
     const count = Number.parseInt(searchParams.get("count") || "5")
+    const autoTranslateParam = searchParams.get("autoTranslate") === "1"
 
     console.log("[v0] Request params:", { category, region, count })
 
@@ -247,16 +263,22 @@ export async function GET(request: NextRequest) {
       console.log(`[v0] Processing ${i + 1}/${count}: "${item.title.substring(0, 50)}..."`)
 
       try {
-        // Check if content is in Thai
+        // Check if content is in Thai and decide if we should translate
         const contentIsThai = isThai(item.title + " " + item.description)
-        console.log(`[v0] Content is Thai: ${contentIsThai}`)
+        const shouldTranslate =
+          autoTranslateParam ||
+          (process.env.AUTO_TRANSLATE_INTL === "true" && region === "intl") ||
+          (process.env.AUTO_TRANSLATE_NON_THAI === "true" && !contentIsThai)
+        console.log(
+          `[v0] Content is Thai: ${contentIsThai} | shouldTranslate: ${shouldTranslate} (param=${autoTranslateParam})`,
+        )
 
         let finalTitle = item.title
         let finalExcerpt = item.description.slice(0, 220)
         let finalContent = ""
         let isTranslated = false
 
-        if (!contentIsThai) {
+        if (shouldTranslate && aiAvailable()) {
           console.log("[v0] Translating to Thai...")
           try {
             const completion = await openai.chat.completions.create({
@@ -283,7 +305,10 @@ export async function GET(request: NextRequest) {
             isTranslated = true
             console.log("[v0] Translation complete")
           } catch (aiError) {
-            console.warn("[v0] AI translation failed, falling back:", aiError)
+            if (process.env.SUPPRESS_AI_WARNINGS !== "true") {
+              console.warn("[v0] AI translation failed, falling back:", aiError)
+            }
+            flagAIError(aiError)
             // Fallback: use original text without translation
             finalTitle = item.title
             finalExcerpt = item.description.slice(0, 220)
@@ -291,32 +316,43 @@ export async function GET(request: NextRequest) {
             isTranslated = false
           }
         } else {
-          console.log("[v0] Improving Thai content...")
-          try {
-            const completion = await openai.chat.completions.create({
-              model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "You are a Thai news editor. Improve and summarize Thai news articles. Return JSON with excerpt (160-220 chars) and content (3-6 short paragraphs).",
-                },
-                {
-                  role: "user",
-                  content: `Improve this Thai news:\n\nTitle: ${item.title}\nDescription: ${item.description}\n\nWrite in neutral, concise, clear Thai.`,
-                },
-              ],
-              response_format: { type: "json_object" },
-              temperature: 0.7,
-            })
+          // Thai content: optionally improve if enabled, else keep as-is to save tokens
+          const enableImprove = process.env.ENABLE_THAI_IMPROVE === "true"
+          if (enableImprove && aiAvailable()) {
+            console.log("[v0] Improving Thai content...")
+            try {
+              const completion = await openai.chat.completions.create({
+                model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+                messages: [
+                  {
+                    role: "system",
+                    content:
+                      "You are a Thai news editor. Improve and summarize Thai news articles. Return JSON with excerpt (160-220 chars) and content (3-6 short paragraphs).",
+                  },
+                  {
+                    role: "user",
+                    content: `Improve this Thai news:\n\nTitle: ${item.title}\nDescription: ${item.description}\n\nWrite in neutral, concise, clear Thai.`,
+                  },
+                ],
+                response_format: { type: "json_object" },
+                temperature: 0.7,
+              })
 
-            const result = JSON.parse(completion.choices[0].message.content || "{}")
-            finalExcerpt = result.excerpt || item.description.slice(0, 220)
-            finalContent = result.content || item.description
-            console.log("[v0] Improvement complete")
-          } catch (aiError) {
-            console.warn("[v0] AI improvement failed, falling back:", aiError)
-            // Fallback: keep original description
+              const result = JSON.parse(completion.choices[0].message.content || "{}")
+              finalExcerpt = result.excerpt || item.description.slice(0, 220)
+              finalContent = result.content || item.description
+              console.log("[v0] Improvement complete")
+            } catch (aiError) {
+              if (process.env.SUPPRESS_AI_WARNINGS !== "true") {
+                console.warn("[v0] AI improvement failed, falling back:", aiError)
+              }
+              flagAIError(aiError)
+              // Fallback: keep original description
+              finalExcerpt = item.description.slice(0, 220)
+              finalContent = item.description
+            }
+          } else {
+            // Improvement disabled: keep original
             finalExcerpt = item.description.slice(0, 220)
             finalContent = item.description
           }
