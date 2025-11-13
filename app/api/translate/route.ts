@@ -103,52 +103,68 @@ export async function POST(request: NextRequest) {
         // Fallback to other providers below
       }
     }
-    // If still not translated, try LibreTranslate if configured or default public instance
-    if (!usedAI) {
-      try {
-        const libreUrl = process.env.LIBRE_TRANSLATE_URL || "https://libretranslate.com"
-        const res = await fetch(`${libreUrl.replace(/\/$/, '')}/translate`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({ q: sourceText, source: "auto", target: "th", format: "text" }),
-          signal: AbortSignal.timeout(12000),
-        })
-        if (res.ok) {
-          const data = (await res.json()) as { translatedText?: string }
-          if (data?.translatedText) {
-            resultContent = data.translatedText
-            // Simple split for title/excerpt if missing
-            if (!resultTitle) resultTitle = resultContent.split(/\n|[。.!?]\s/)[0]?.slice(0, 120) || ""
-            if (!resultExcerpt) resultExcerpt = resultContent.slice(0, 200)
-            usedAI = true
-          }
-        }
-      } catch {}
+    // Helper fallbacks: translate specific fields (title, excerpt, content)
+    async function libreTranslate(q: string): Promise<string | undefined> {
+      const libreUrl = process.env.LIBRE_TRANSLATE_URL || "https://libretranslate.com"
+      const res = await fetch(`${libreUrl.replace(/\/$/, '')}/translate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ q, source: "auto", target: "th", format: "text" }),
+        signal: AbortSignal.timeout(12000),
+      })
+      if (!res.ok) return undefined
+      const data = (await res.json()) as { translatedText?: string }
+      return data?.translatedText?.trim() || undefined
     }
 
-    // Last resort: Google translate (unofficial)
-    if (!usedAI) {
+    async function gtxTranslate(q: string): Promise<string | undefined> {
+      const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: "th", dt: "t", q })
+      const res = await fetch(`https://translate.googleapis.com/translate_a/single?${params.toString()}`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(12000),
+      })
+      if (!res.ok) return undefined
+      const json = (await res.json()) as any
+      const chunks: string[] = (json?.[0] || []).map((c: any) => (c?.[0] || ""))
+      const translated = chunks.join("").trim()
+      return translated || undefined
+    }
+
+    async function translateField(q: string | undefined): Promise<string | undefined> {
+      if (!q || !q.trim()) return undefined
+      // Try Libre first, then gtx
       try {
-        const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: "th", dt: "t", q: sourceText })
-        const res = await fetch(`https://translate.googleapis.com/translate_a/single?${params.toString()}`, {
-          headers: { Accept: "application/json" },
-          signal: AbortSignal.timeout(12000),
-        })
-        if (res.ok) {
-          const json = (await res.json()) as any
-          const chunks: string[] = (json?.[0] || []).map((c: any) => (c?.[0] || ""))
-          const translated = chunks.join("")
-          if (translated) {
-            resultContent = translated
-            if (!resultTitle) resultTitle = translated.split(/\n|[。.!?]\s/)[0]?.slice(0, 120) || ""
-            if (!resultExcerpt) resultExcerpt = translated.slice(0, 200)
-            usedAI = true
-          }
-        }
+        const viaLibre = await libreTranslate(q)
+        if (viaLibre) return viaLibre
       } catch {}
+      try {
+        const viaGtx = await gtxTranslate(q)
+        if (viaGtx) return viaGtx
+      } catch {}
+      return undefined
+    }
+
+    // If still not translated via OpenAI, translate fields individually via fallbacks
+    if (!usedAI) {
+      const [tTitle, tExcerpt, tContent] = await Promise.all([
+        translateField(title),
+        translateField(description || (content ? content.slice(0, 220) : undefined)),
+        translateField(content || sourceText),
+      ])
+
+      if (tTitle || tExcerpt || tContent) {
+        if (tTitle) resultTitle = tTitle
+        if (tExcerpt) resultExcerpt = tExcerpt
+        if (tContent) resultContent = tContent
+        // Derive missing pieces from content if needed
+        if (!resultTitle && resultContent) {
+          resultTitle = resultContent.split(/\n|[。.!?]\s/)[0]?.slice(0, 120) || ""
+        }
+        if (!resultExcerpt && resultContent) {
+          resultExcerpt = resultContent.slice(0, 200)
+        }
+        usedAI = true
+      }
     }
 
     return Response.json({
