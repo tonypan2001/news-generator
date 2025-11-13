@@ -119,7 +119,8 @@ async function parseRSS(
         .trim()
         .slice(0, 500)
 
-      if (title && link && title.length > 10) {
+      // Keep even short titles; upstream feeds can be terse
+      if (title && link) {
         items.push({ title, link, pubDate, description })
       }
     }
@@ -347,6 +348,27 @@ export async function GET(request: NextRequest) {
     }
 
     if (results.length === 0) {
+      console.warn("[v0] No AI-generated results, constructing fallback items from feed content")
+      const fallback: NormalizedNews[] = selected.slice(0, Math.min(count, selected.length)).map((item) => {
+        const query = buildUnsplashQuery(category, item.title)
+        return {
+          Title: item.title,
+          Slug: slugify(item.title),
+          Excerpt: item.description.slice(0, 220),
+          Category: category,
+          Cover: buildUnsplashUrl(query),
+          Sources: [item.link],
+          Content: item.description,
+          isTranslated: false,
+          coverNote: `Unsplash license image (query: ${query})`,
+        }
+      })
+
+      if (fallback.length > 0) {
+        console.warn("[v0] Returning", fallback.length, "fallback results")
+        return Response.json(fallback)
+      }
+
       return Response.json({ error: "Failed to process any articles. Please try again." }, { status: 500 })
     }
 
