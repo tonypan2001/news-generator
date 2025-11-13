@@ -1,6 +1,6 @@
 "use client"
 
-import { Copy, Check, Loader2, Languages } from "lucide-react"
+import { Copy, Check, Loader2, Languages, Sparkles } from "lucide-react"
 import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -18,6 +18,7 @@ export function NewsCard({ news, index }: NewsCardProps) {
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [data, setData] = useState<NormalizedNews>(news)
   const [translating, setTranslating] = useState(false)
+  const [reformatting, setReformatting] = useState(false)
 
   const copyToClipboard = async (text: string, fieldName: string) => {
     try {
@@ -83,6 +84,34 @@ export function NewsCard({ news, index }: NewsCardProps) {
     }
   }
 
+  const handleReformat = async () => {
+    if (reformatting) return
+    setReformatting(true)
+    try {
+      const res = await fetch("/api/reformat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: data.Title, excerpt: data.Excerpt, content: data.Content, category: data.Category }),
+      })
+      const json = await res.json()
+      if (!res.ok) {
+        throw new Error(json?.error || `Reformat failed (${res.status})`)
+      }
+      const updated: NormalizedNews = {
+        ...data,
+        Title: json.title || data.Title,
+        Excerpt: json.excerpt || data.Excerpt,
+        Content: json.content || data.Content,
+      }
+      setData(updated)
+      toast({ description: "Reformatted for SEO" })
+    } catch (e) {
+      toast({ variant: "destructive", description: e instanceof Error ? e.message : "Reformat failed" })
+    } finally {
+      setReformatting(false)
+    }
+  }
+
   return (
     <Card className="relative">
       <CardHeader className="pb-3">
@@ -99,6 +128,17 @@ export function NewsCard({ news, index }: NewsCardProps) {
             >
               {translating ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Languages className="size-3.5 mr-1.5" />}
               Translate to Thai
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleReformat}
+              disabled={reformatting}
+              className="shrink-0 bg-transparent"
+              title="Reformat into SEO-friendly blog content"
+            >
+              {reformatting ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Sparkles className="size-3.5 mr-1.5" />}
+              Re format
             </Button>
             <Button variant="outline" size="sm" onClick={copyAllAsJSON} className="shrink-0 bg-transparent">
               <Copy className="size-3.5 mr-1.5" />
