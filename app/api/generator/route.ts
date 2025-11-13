@@ -14,6 +14,50 @@ function aiAvailable() {
   const cooldownMs = Number(process.env.AI_COOLDOWN_MS || 5 * 60 * 1000)
   return Date.now() - LAST_AI_ERROR_AT > cooldownMs
 }
+
+// Lightweight translation fallbacks (non-OpenAI)
+async function libreTranslate(q: string): Promise<string | undefined> {
+  try {
+    const base = process.env.LIBRE_TRANSLATE_URL || "https://libretranslate.com"
+    const res = await fetch(`${base.replace(/\/$/, "")}/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ q, source: "auto", target: "th", format: "text" }),
+      signal: AbortSignal.timeout(12000),
+    })
+    if (!res.ok) return undefined
+    const data = (await res.json()) as { translatedText?: string }
+    return data?.translatedText?.trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function gtxTranslate(q: string): Promise<string | undefined> {
+  try {
+    const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: "th", dt: "t", q })
+    const res = await fetch(`https://translate.googleapis.com/translate_a/single?${params.toString()}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(12000),
+    })
+    if (!res.ok) return undefined
+    const json = (await res.json()) as any
+    const chunks: string[] = (json?.[0] || []).map((c: any) => c?.[0] || "")
+    const translated = chunks.join("").trim()
+    return translated || undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function translateField(q?: string): Promise<string | undefined> {
+  if (!q || !q.trim()) return undefined
+  const viaLibre = await libreTranslate(q)
+  if (viaLibre) return viaLibre
+  const viaGtx = await gtxTranslate(q)
+  if (viaGtx) return viaGtx
+  return undefined
+}
 function flagAIError(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e)
   if (/429|insufficient_quota|rate limit/i.test(msg)) {
@@ -169,7 +213,7 @@ export async function GET(request: NextRequest) {
     const category = searchParams.get("category") as Category
     const region = searchParams.get("region") as Region
     const count = Number.parseInt(searchParams.get("count") || "5")
-    const autoTranslateParam = searchParams.get("autoTranslate") === "1"
+    // Auto-translate and reformat are now always enabled post-generation
 
     console.log("[v0] Request params:", { category, region, count })
 
@@ -265,12 +309,9 @@ export async function GET(request: NextRequest) {
       try {
         // Check if content is in Thai and decide if we should translate
         const contentIsThai = isThai(item.title + " " + item.description)
-        const shouldTranslate =
-          autoTranslateParam ||
-          (process.env.AUTO_TRANSLATE_INTL === "true" && region === "intl") ||
-          (process.env.AUTO_TRANSLATE_NON_THAI === "true" && !contentIsThai)
+        const shouldTranslate = true
         console.log(
-          `[v0] Content is Thai: ${contentIsThai} | shouldTranslate: ${shouldTranslate} (param=${autoTranslateParam})`,
+          `[v0] Content is Thai: ${contentIsThai} | auto-translate enabled: ${shouldTranslate}`,
         )
 
         let finalTitle = item.title
@@ -287,11 +328,11 @@ export async function GET(request: NextRequest) {
                 {
                   role: "system",
                   content:
-                    "You are a Thai news editor. Translate and summarize news articles into Thai. Keep proper nouns in their original form. Return JSON with title, excerpt (160-220 chars), and content (3-6 short paragraphs).",
+                    "You are a Thai news editor. Translate, reorganize, and polish international news into clear Thai suitable for reading on the web. Keep proper nouns in original form where appropriate. Return JSON with title (concise), excerpt (160-220 chars), and content as 3-6 short paragraphs separated by blank lines. Improve clarity, remove redundancy, and maintain factual accuracy. Do not invent facts.",
                 },
                 {
                   role: "user",
-                  content: `Translate this news to Thai:\n\nTitle: ${item.title}\nDescription: ${item.description}\n\nWrite in neutral, concise, clear Thai. Do not add facts not present in the original.`,
+                  content: `Translate and reformat to Thai with well-spaced paragraphs.\n\nTitle: ${item.title}\nDescription: ${item.description}`,
                 },
               ],
               response_format: { type: "json_object" },
@@ -301,7 +342,7 @@ export async function GET(request: NextRequest) {
             const result = JSON.parse(completion.choices[0].message.content || "{}")
             finalTitle = result.title || item.title
             finalExcerpt = result.excerpt || item.description.slice(0, 220)
-            finalContent = result.content || ""
+            finalContent = result.content || item.description
             isTranslated = true
             console.log("[v0] Translation complete")
           } catch (aiError) {
@@ -309,52 +350,56 @@ export async function GET(request: NextRequest) {
               console.warn("[v0] AI translation failed, falling back:", aiError)
             }
             flagAIError(aiError)
-            // Fallback: use original text without translation
-            finalTitle = item.title
-            finalExcerpt = item.description.slice(0, 220)
-            finalContent = item.description
-            isTranslated = false
+            // Fallback: try non-OpenAI translation providers
+            const [tTitle, tExcerpt, tContent] = await Promise.all([
+              translateField(item.title),
+              translateField(item.description.slice(0, 220)),
+              translateField(item.description),
+            ])
+            if (tTitle || tExcerpt || tContent) {
+              finalTitle = tTitle || item.title
+              const rawContent = tContent || item.description
+              // Space content into short paragraphs
+              const sentences = rawContent.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
+              const paragraphs: string[] = []
+              for (let s = 0; s < sentences.length; s += 2) paragraphs.push(sentences.slice(s, s + 2).join(" "))
+              finalContent = paragraphs.join("\n\n") || rawContent
+              finalExcerpt = tExcerpt || finalContent.slice(0, 220)
+              isTranslated = true
+            } else {
+              // Last resort: keep original English but spaced
+              finalTitle = item.title
+              finalExcerpt = item.description.slice(0, 220)
+              const sentences = item.description.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
+              const paragraphs: string[] = []
+              for (let s = 0; s < sentences.length; s += 2) paragraphs.push(sentences.slice(s, s + 2).join(" "))
+              finalContent = paragraphs.join("\n\n") || item.description
+              isTranslated = false
+            }
           }
         } else {
-          // Thai content: optionally improve if enabled, else keep as-is to save tokens
-          const enableImprove = process.env.ENABLE_THAI_IMPROVE === "true"
-          if (enableImprove && aiAvailable()) {
-            console.log("[v0] Improving Thai content...")
-            try {
-              const completion = await openai.chat.completions.create({
-                model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-                messages: [
-                  {
-                    role: "system",
-                    content:
-                      "You are a Thai news editor. Improve and summarize Thai news articles. Return JSON with excerpt (160-220 chars) and content (3-6 short paragraphs).",
-                  },
-                  {
-                    role: "user",
-                    content: `Improve this Thai news:\n\nTitle: ${item.title}\nDescription: ${item.description}\n\nWrite in neutral, concise, clear Thai.`,
-                  },
-                ],
-                response_format: { type: "json_object" },
-                temperature: 0.7,
-              })
-
-              const result = JSON.parse(completion.choices[0].message.content || "{}")
-              finalExcerpt = result.excerpt || item.description.slice(0, 220)
-              finalContent = result.content || item.description
-              console.log("[v0] Improvement complete")
-            } catch (aiError) {
-              if (process.env.SUPPRESS_AI_WARNINGS !== "true") {
-                console.warn("[v0] AI improvement failed, falling back:", aiError)
-              }
-              flagAIError(aiError)
-              // Fallback: keep original description
-              finalExcerpt = item.description.slice(0, 220)
-              finalContent = item.description
-            }
+          // AI not available: try translation fallbacks; else lightly reflow
+          const [tTitle, tExcerpt, tContent] = await Promise.all([
+            translateField(item.title),
+            translateField(item.description.slice(0, 220)),
+            translateField(item.description),
+          ])
+          if (tTitle || tExcerpt || tContent) {
+            finalTitle = tTitle || item.title
+            const rawContent = tContent || item.description
+            const sentences = rawContent.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
+            const paragraphs: string[] = []
+            for (let s = 0; s < sentences.length; s += 2) paragraphs.push(sentences.slice(s, s + 2).join(" "))
+            finalContent = paragraphs.join("\n\n") || rawContent
+            finalExcerpt = tExcerpt || finalContent.slice(0, 220)
+            isTranslated = true
           } else {
-            // Improvement disabled: keep original
-            finalExcerpt = item.description.slice(0, 220)
-            finalContent = item.description
+            const raw = item.description || ""
+            const sentences = raw.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
+            const paragraphs: string[] = []
+            for (let i = 0; i < sentences.length; i += 2) paragraphs.push(sentences.slice(i, i + 2).join(" "))
+            finalExcerpt = raw.slice(0, 220)
+            finalContent = paragraphs.join("\n\n") || raw
           }
         }
 
