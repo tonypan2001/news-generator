@@ -65,6 +65,60 @@ function flagAIError(e: unknown) {
   }
 }
 
+// Fetch and extract full article text for better content generation
+function stripTags(html: string) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function extractMainFromHtml(html: string): string {
+  const pick = (re: RegExp) => html.match(re)?.[0]
+  const article = pick(/<article[\s\S]*?<\/article>/i)
+  if (article) return stripTags(article)
+  const main = pick(/<main[\s\S]*?<\/main>/i)
+  if (main) return stripTags(main)
+  const contentDiv = pick(/<div[^>]+(id|class)=["'][^"']*(article|content|post|entry)[^"']*["'][\s\S]*?<\/div>/i)
+  if (contentDiv) return stripTags(contentDiv)
+  const body = pick(/<body[\s\S]*?<\/body>/i)
+  return stripTags(body || html)
+}
+
+function toParagraphs(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim()
+  let sentences = normalized.split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
+  if (sentences.length < 3) {
+    const chunks: string[] = []
+    for (let i = 0; i < normalized.length; i += 140) chunks.push(normalized.slice(i, i + 140))
+    sentences = chunks
+  }
+  const paras: string[] = []
+  for (let i = 0; i < sentences.length; i += 2) paras.push(sentences.slice(i, i + 2).join(" "))
+  return paras.join("\n\n")
+}
+
+async function fetchArticleText(url: string): Promise<string> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; PulseDailyBot/1.0)",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!res.ok) return ""
+    const html = await res.text()
+    const text = extractMainFromHtml(html)
+    return text.slice(0, 8000)
+  } catch {
+    return ""
+  }
+}
+
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
@@ -319,6 +373,10 @@ export async function GET(request: NextRequest) {
         let finalContent = ""
         let isTranslated = false
 
+        // Try to fetch the full article body for richer content
+        const articleText = await fetchArticleText(item.link)
+        const baseText = articleText || item.description
+
         if (shouldTranslate && aiAvailable()) {
           console.log("[v0] Translating to Thai...")
           try {
@@ -332,7 +390,7 @@ export async function GET(request: NextRequest) {
                 },
                 {
                   role: "user",
-                  content: `Translate and reformat to Thai with well-spaced paragraphs.\n\nTitle: ${item.title}\nDescription: ${item.description}`,
+                  content: `Translate and reformat to Thai with well-spaced paragraphs.\n\nTitle: ${item.title}\nDescription: ${item.description}\n\nContent:\n${baseText}`,
                 },
               ],
               response_format: { type: "json_object" },
@@ -342,7 +400,7 @@ export async function GET(request: NextRequest) {
             const result = JSON.parse(completion.choices[0].message.content || "{}")
             finalTitle = result.title || item.title
             finalExcerpt = result.excerpt || item.description.slice(0, 220)
-            finalContent = result.content || item.description
+            finalContent = result.content || toParagraphs(baseText)
             isTranslated = true
             console.log("[v0] Translation complete")
           } catch (aiError) {
@@ -353,27 +411,21 @@ export async function GET(request: NextRequest) {
             // Fallback: try non-OpenAI translation providers
             const [tTitle, tExcerpt, tContent] = await Promise.all([
               translateField(item.title),
-              translateField(item.description.slice(0, 220)),
-              translateField(item.description),
+              translateField(baseText.slice(0, 220)),
+              translateField(baseText),
             ])
             if (tTitle || tExcerpt || tContent) {
               finalTitle = tTitle || item.title
-              const rawContent = tContent || item.description
+              const rawContent = tContent || baseText
               // Space content into short paragraphs
-              const sentences = rawContent.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
-              const paragraphs: string[] = []
-              for (let s = 0; s < sentences.length; s += 2) paragraphs.push(sentences.slice(s, s + 2).join(" "))
-              finalContent = paragraphs.join("\n\n") || rawContent
-              finalExcerpt = tExcerpt || finalContent.slice(0, 220)
+              finalContent = toParagraphs(rawContent)
+              finalExcerpt = tExcerpt || (finalContent || "").slice(0, 220)
               isTranslated = true
             } else {
               // Last resort: keep original English but spaced
               finalTitle = item.title
               finalExcerpt = item.description.slice(0, 220)
-              const sentences = item.description.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
-              const paragraphs: string[] = []
-              for (let s = 0; s < sentences.length; s += 2) paragraphs.push(sentences.slice(s, s + 2).join(" "))
-              finalContent = paragraphs.join("\n\n") || item.description
+              finalContent = toParagraphs(baseText)
               isTranslated = false
             }
           }
@@ -381,25 +433,19 @@ export async function GET(request: NextRequest) {
           // AI not available: try translation fallbacks; else lightly reflow
           const [tTitle, tExcerpt, tContent] = await Promise.all([
             translateField(item.title),
-            translateField(item.description.slice(0, 220)),
-            translateField(item.description),
+            translateField(baseText.slice(0, 220)),
+            translateField(baseText),
           ])
           if (tTitle || tExcerpt || tContent) {
             finalTitle = tTitle || item.title
-            const rawContent = tContent || item.description
-            const sentences = rawContent.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
-            const paragraphs: string[] = []
-            for (let s = 0; s < sentences.length; s += 2) paragraphs.push(sentences.slice(s, s + 2).join(" "))
-            finalContent = paragraphs.join("\n\n") || rawContent
+            const rawContent = tContent || baseText
+            finalContent = toParagraphs(rawContent)
             finalExcerpt = tExcerpt || finalContent.slice(0, 220)
             isTranslated = true
           } else {
-            const raw = item.description || ""
-            const sentences = raw.replace(/\s+/g, " ").split(/(?<=[.!?\u0E2F\u0E46])\s+/).filter(Boolean)
-            const paragraphs: string[] = []
-            for (let i = 0; i < sentences.length; i += 2) paragraphs.push(sentences.slice(i, i + 2).join(" "))
+            const raw = baseText || ""
             finalExcerpt = raw.slice(0, 220)
-            finalContent = paragraphs.join("\n\n") || raw
+            finalContent = toParagraphs(raw)
           }
         }
 
