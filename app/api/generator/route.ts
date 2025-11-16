@@ -114,6 +114,59 @@ function formatContentForReadability(text: string): string {
   return "\n\n" + doubled
 }
 
+// Build plain-text structured article for Sanity/portable text
+function splitSentences(text: string): string[] {
+  return (text || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?\u0E2F\u0E46])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function chunkSentences(sentences: string[], per = 2): string[] {
+  const paras: string[] = []
+  for (let i = 0; i < sentences.length; i += per) {
+    paras.push(sentences.slice(i, i + per).join(" "))
+  }
+  return paras
+}
+
+function buildStructuredArticle(title: string, excerpt: string, body: string, sources: string[]): string {
+  const sents = splitSentences(body)
+  const intro = sents.slice(0, 3).join(" ")
+  const summary13 = sents.slice(0, 13).join(" ")
+  const afterIntro = sents.slice(3)
+  const keyPoints = afterIntro.slice(0, 6)
+  const details = afterIntro.slice(6)
+  const detailParas = chunkSentences(details, 2)
+  const conclusion = (sents.slice(-2).join(" ") || intro).trim()
+
+  const lines: string[] = []
+  lines.push("Title", "", (title || "").trim(), "")
+  lines.push("Excerpt", "", (summary13 || excerpt || "").trim(), "")
+  lines.push("Introduction", "", intro.trim(), "")
+  lines.push("Main Sections", "")
+  if (keyPoints.length) {
+    lines.push("Key Points", "")
+    for (const k of keyPoints) lines.push(`- ${k}`)
+    lines.push("")
+  }
+  if (detailParas.length) {
+    lines.push("Details", "")
+    for (const p of detailParas) lines.push(p, "")
+  }
+  lines.push("Conclusion", "", conclusion, "")
+  lines.push("Sources", "")
+  if (sources && sources.length) {
+    for (const src of sources) lines.push(`- ${src}`)
+  } else {
+    lines.push("No external sources provided.")
+  }
+  return lines.join("\n")
+}
+
 async function fetchArticleText(url: string): Promise<string> {
   try {
     const res = await fetch(url, {
@@ -413,7 +466,12 @@ export async function GET(request: NextRequest) {
             const result = JSON.parse(completion.choices[0].message.content || "{}")
             finalTitle = result.title || item.title
             finalExcerpt = result.excerpt || item.description.slice(0, 220)
-            finalContent = formatContentForReadability(result.content || toParagraphs(baseText))
+            finalContent = buildStructuredArticle(
+              result.title || item.title,
+              result.excerpt || item.description.slice(0, 220),
+              formatContentForReadability(result.content || toParagraphs(baseText)),
+              [item.link],
+            )
             isTranslated = true
             console.log("[v0] Translation complete")
           } catch (aiError) {
@@ -431,14 +489,24 @@ export async function GET(request: NextRequest) {
               finalTitle = tTitle || item.title
               const rawContent = tContent || baseText
               // Space content into short paragraphs
-              finalContent = formatContentForReadability(rawContent)
+              finalContent = buildStructuredArticle(
+                tTitle || item.title,
+                tExcerpt || (rawContent || "").slice(0, 220),
+                formatContentForReadability(rawContent),
+                [item.link],
+              )
               finalExcerpt = tExcerpt || (rawContent || "").slice(0, 220)
               isTranslated = true
             } else {
               // Last resort: keep original English but spaced
               finalTitle = item.title
               finalExcerpt = item.description.slice(0, 220)
-              finalContent = formatContentForReadability(baseText)
+              finalContent = buildStructuredArticle(
+                item.title,
+                item.description.slice(0, 220),
+                formatContentForReadability(baseText),
+                [item.link],
+              )
               isTranslated = false
             }
           }
@@ -452,13 +520,23 @@ export async function GET(request: NextRequest) {
           if (tTitle || tExcerpt || tContent) {
             finalTitle = tTitle || item.title
             const rawContent = tContent || baseText
-            finalContent = formatContentForReadability(rawContent)
+            finalContent = buildStructuredArticle(
+              tTitle || item.title,
+              tExcerpt || (rawContent || "").slice(0, 220),
+              formatContentForReadability(rawContent),
+              [item.link],
+            )
             finalExcerpt = tExcerpt || finalContent.slice(0, 220)
             isTranslated = true
           } else {
             const raw = baseText || ""
             finalExcerpt = raw.slice(0, 220)
-            finalContent = formatContentForReadability(raw)
+            finalContent = buildStructuredArticle(
+              item.title,
+              finalExcerpt,
+              formatContentForReadability(raw),
+              [item.link],
+            )
           }
         }
 
